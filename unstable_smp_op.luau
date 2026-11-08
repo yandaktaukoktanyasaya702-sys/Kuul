@@ -16,15 +16,18 @@ local Controller = require(MC:WaitForChild("Controller"))
 local World = require(MC:WaitForChild("World"))
 
 local TOTEM_ID = "totem_of_undying"
+local pearlCatch
 local CFG = {
 	killaura = true,
 	autoTotem = true,
 	camLock = true,
 	esp = true,
 	critOnly = true,
+	pearlButton = false,
 	range = 3.5,
 	totemHealth = 8,
-	camSmooth = 8
+	camSmooth = 8,
+	pearlDelay = 0.25
 }
 env.UNSTABLE_SMP_CFG = CFG
 
@@ -44,9 +47,40 @@ espGui.DisplayOrder = 999998
 espGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 espGui.Parent = playerGui
 
+local pearlGui = Instance.new("ScreenGui")
+pearlGui.Name = "UNSTABLE_SMP_PEARL"
+pearlGui.ResetOnSpawn = false
+pearlGui.IgnoreGuiInset = true
+pearlGui.DisplayOrder = 1000000
+pearlGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pearlGui.Enabled = false
+pearlGui.Parent = playerGui
+
+local pearlButton = Instance.new("TextButton")
+pearlButton.Name = "PearlCatch"
+pearlButton.Size = UDim2.fromOffset(58, 58)
+pearlButton.Position = UDim2.new(1, -86, 0, 200)
+pearlButton.BackgroundColor3 = Color3.fromRGB(42, 112, 74)
+pearlButton.AutoButtonColor = false
+pearlButton.Active = true
+pearlButton.Text = "PEARL"
+pearlButton.Font = Enum.Font.GothamBold
+pearlButton.TextSize = 11
+pearlButton.TextColor3 = Color3.fromRGB(245, 245, 248)
+pearlButton.Parent = pearlGui
+
+local pearlCorner = Instance.new("UICorner")
+pearlCorner.CornerRadius = UDim.new(0, 9)
+pearlCorner.Parent = pearlButton
+
+local pearlStroke = Instance.new("UIStroke")
+pearlStroke.Color = Color3.fromRGB(120, 220, 150)
+pearlStroke.Thickness = 1.5
+pearlStroke.Parent = pearlButton
+
 local frame = Instance.new("Frame")
 frame.Name = "Main"
-frame.Size = UDim2.fromOffset(252, 364)
+frame.Size = UDim2.fromOffset(252, 428)
 frame.Position = UDim2.new(0, 20, 0, 120)
 frame.BackgroundColor3 = Color3.fromRGB(18, 18, 22)
 frame.BackgroundTransparency = 0.05
@@ -98,7 +132,7 @@ close.Parent = frame
 local status = Instance.new("TextLabel")
 status.Name = "Status"
 status.Size = UDim2.new(1, -24, 0, 30)
-status.Position = UDim2.fromOffset(12, 300)
+status.Position = UDim2.fromOffset(12, 364)
 status.BackgroundTransparency = 1
 status.Text = "HP ?   Offhand ?   Targets 0"
 status.Font = Enum.Font.Code
@@ -112,9 +146,9 @@ status.Parent = frame
 local footer = Instance.new("TextLabel")
 footer.Name = "Footer"
 footer.Size = UDim2.new(1, -24, 0, 14)
-footer.Position = UDim2.fromOffset(12, 336)
+footer.Position = UDim2.fromOffset(12, 400)
 footer.BackgroundTransparency = 1
-footer.Text = "K kill T totem P esp C crit RShift"
+footer.Text = "K kill T totem P esp C crit G pearl RShift"
 footer.Font = Enum.Font.Code
 footer.TextSize = 10
 footer.TextColor3 = Color3.fromRGB(120, 120, 132)
@@ -129,7 +163,8 @@ local toggleLabels = {
 	autoTotem = "Auto Totem",
 	camLock = "Camera Lock",
 	esp = "ESP",
-	critOnly = "Crit Only"
+	critOnly = "Crit Only",
+	pearlButton = "Pearl Button"
 }
 
 local function makeToggle(labelText, key, y)
@@ -241,9 +276,11 @@ makeToggle("Auto Totem", "autoTotem", 72)
 makeToggle("Camera Lock", "camLock", 104)
 makeToggle("ESP", "esp", 136)
 makeToggle("Crit Only", "critOnly", 168)
-makeStep("Killaura Range", "range", 1, 6, 0.5, 200, "%.1f")
-makeStep("Totem HP", "totemHealth", 1, 20, 1, 232, "%d")
-makeStep("Camera Smooth", "camSmooth", 1, 20, 1, 264, "%d")
+makeToggle("Pearl Button", "pearlButton", 200)
+makeStep("Killaura Range", "range", 1, 6, 0.5, 232, "%.1f")
+makeStep("Totem HP", "totemHealth", 1, 20, 1, 264, "%d")
+makeStep("Camera Smooth", "camSmooth", 1, 20, 1, 296, "%d")
+makeStep("Pearl Delay", "pearlDelay", 0.05, 1, 0.05, 328, "%.2f")
 
 refresh = function()
 	for key, button in pairs(toggleButtons) do
@@ -255,6 +292,7 @@ refresh = function()
 	for key, item in pairs(valueLabels) do
 		item.label.Text = item.format:format(CFG[key])
 	end
+	pearlGui.Enabled = CFG.pearlButton == true
 end
 
 refresh()
@@ -262,12 +300,61 @@ refresh()
 local connections = {}
 local destroyed = false
 local totemBusy = false
+local pearlBusy = false
+local pearlTrack = nil
+local pearlCapture = nil
 local lastAttack = 0
 local lastStatus = 0
 local camTarget = nil
 local espElements = {}
 local CAMERA_BIND = "UNSTABLE_SMP_CAMERA"
 local ESP_BIND = "UNSTABLE_SMP_ESP"
+local PEARL_ID = "ender_pearl"
+local WIND_ID = "wind_charge"
+
+local function entityId()
+	local character = plr.Character
+	return character and character:GetAttribute("EntityId") or nil
+end
+
+local function pearlModelPos(pid)
+	local folder = workspace:FindFirstChild("MCWorld")
+	folder = folder and folder:FindFirstChild("Projectiles")
+	local model = folder and pid and folder:FindFirstChild("Proj" .. tostring(pid))
+	return model and model.PrimaryPart and model.PrimaryPart.Position or nil
+end
+
+Net.on("proj", function(data)
+	if destroyed then
+		return
+	end
+	if data.kind == "pearl" and tostring(data.owner) == tostring(entityId()) then
+		pearlCapture = data.pid
+		pearlTrack = {
+			pid = data.pid,
+			pos = data.pos,
+			vel = data.vel,
+			g = data.g or 0,
+			drag = data.drag or 1
+		}
+	end
+end)
+
+Net.on("projSync", function(data)
+	if destroyed or not pearlTrack or data.pid ~= pearlTrack.pid then
+		return
+	end
+	pearlTrack.pos = data.pos
+	pearlTrack.vel = data.vel
+	pearlTrack.g = data.g or pearlTrack.g
+	pearlTrack.drag = data.drag or pearlTrack.drag
+end)
+
+Net.on("projEnd", function(data)
+	if pearlTrack and data.pid == pearlTrack.pid then
+		pearlTrack = nil
+	end
+end)
 
 local function track(connection)
 	connections[#connections + 1] = connection
@@ -512,7 +599,7 @@ local function updateEsp()
 end
 
 local function doKillaura()
-	if not CFG.killaura or Controller.locked then
+	if not CFG.killaura or Controller.locked or pearlBusy then
 		return
 	end
 	if workspace:GetAttribute("JugHold") == true then
@@ -598,7 +685,7 @@ local function inventoryTotem()
 end
 
 local function ensureTotem()
-	if not CFG.autoTotem or totemBusy then
+	if not CFG.autoTotem or totemBusy or pearlBusy then
 		return
 	end
 	local inv = Hands.inv
@@ -662,6 +749,173 @@ local function ensureTotem()
 	end)
 end
 
+local function hotbarSlot(id)
+	local inv = Hands.inv
+	if not inv or not inv.hotbar then
+		return nil
+	end
+	for slot = 1, 9 do
+		local item = inv.hotbar[slot]
+		if item and item.id == id then
+			return slot
+		end
+	end
+	return nil
+end
+
+pearlCatch = function()
+	if pearlBusy or destroyed then
+		return
+	end
+	if Controller.locked or workspace:GetAttribute("JugHold") == true then
+		return
+	end
+	local character = plr.Character
+	if not character or character:GetAttribute("Alive") ~= true then
+		return
+	end
+	local okMode, mode = pcall(Hands.gamemode)
+	if okMode and mode == "spectator" then
+		return
+	end
+	local pearlSlot = hotbarSlot(PEARL_ID)
+	local windSlot = hotbarSlot(WIND_ID)
+	if not pearlSlot or not windSlot then
+		status.Text = "Pearl: missing pearl or wind charge"
+		return
+	end
+	local okPearlCd, pearlCd = pcall(Hands.cooldownFraction, PEARL_ID)
+	local okWindCd, windCd = pcall(Hands.cooldownFraction, WIND_ID)
+	if (okPearlCd and pearlCd > 0) or (okWindCd and windCd > 0) then
+		status.Text = "Pearl: cooldown"
+		return
+	end
+	local inv = Hands.inv
+	if not inv or not inv.selected then
+		return
+	end
+	local original = inv.selected
+	local look = Vector3.new(0, 1, 0)
+	pearlBusy = true
+	pearlTrack = nil
+	pearlCapture = nil
+	Hands.cooldowns = Hands.cooldowns or {}
+	pcall(Hands.select, pearlSlot)
+	local okUse = pcall(Net.send, {
+		a = "use",
+		hand = "main",
+		look = look,
+		item = PEARL_ID
+	})
+	if not okUse then
+		pearlBusy = false
+		return
+	end
+	Hands.cooldowns[PEARL_ID] = { start = os.clock(), ticks = 20 }
+	task.spawn(function()
+		pcall(function()
+			local delay = math.clamp(CFG.pearlDelay or 0.25, 0.05, 1)
+			local start = os.clock()
+			while os.clock() - start < delay do
+				task.wait(0.01)
+			end
+			local windLook = look
+			local pearlPid = pearlCapture or (pearlTrack and pearlTrack.pid)
+			local pearlPos = pearlModelPos(pearlPid)
+			local eye = Controller.eye()
+			if pearlPos and eye then
+				local delta = pearlPos - eye * 3
+				if delta.Magnitude > 0.0001 then
+					windLook = delta.Unit
+				end
+			elseif pearlTrack and eye then
+				local delta = pearlTrack.pos - eye * 3
+				if delta.Magnitude > 0.0001 then
+					windLook = delta.Unit
+				end
+			end
+			pcall(Hands.select, windSlot)
+			pcall(Net.send, {
+				a = "use",
+				hand = "main",
+				look = windLook,
+				item = WIND_ID,
+				predictWind = false
+			})
+			Hands.cooldowns[WIND_ID] = { start = os.clock(), ticks = 10 }
+			task.wait(0.05)
+			if original then
+				pcall(Hands.select, original)
+			end
+		end)
+		pearlBusy = false
+	end)
+	return true
+end
+
+local pearlDragging = false
+local pearlMoved = false
+local pearlDragStart = nil
+local pearlStartPosition = nil
+
+track(pearlButton.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		pearlDragging = true
+		pearlMoved = false
+		pearlDragStart = input.Position
+		pearlStartPosition = UDim2.fromOffset(pearlButton.AbsolutePosition.X, pearlButton.AbsolutePosition.Y)
+	end
+end))
+
+track(UIS.InputChanged:Connect(function(input)
+	if not pearlDragging then
+		return
+	end
+	if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		local delta = input.Position - pearlDragStart
+		if delta.Magnitude > 6 then
+			pearlMoved = true
+		end
+		local camera = workspace.CurrentCamera
+		local viewport = camera and camera.ViewportSize or Vector2.new(1280, 720)
+		local width = pearlButton.AbsoluteSize.X
+		local height = pearlButton.AbsoluteSize.Y
+		local nextX = math.clamp(pearlStartPosition.X.Offset + delta.X, 0, math.max(0, viewport.X - width))
+		local nextY = math.clamp(pearlStartPosition.Y.Offset + delta.Y, 0, math.max(0, viewport.Y - height))
+		pearlButton.Position = UDim2.fromOffset(nextX, nextY)
+	end
+end))
+
+track(UIS.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		if pearlDragging and not pearlMoved then
+			if pearlCatch() then
+				pearlButton.BackgroundColor3 = Color3.fromRGB(70, 150, 96)
+				task.delay(0.15, function()
+					if pearlButton and pearlButton.Parent then
+						pearlButton.BackgroundColor3 = Color3.fromRGB(42, 112, 74)
+					end
+				end)
+			end
+		end
+		pearlDragging = false
+	end
+end))
+
+track(pearlButton.MouseButton1Click:Connect(function()
+	if pearlMoved then
+		return
+	end
+	if pearlCatch() then
+		pearlButton.BackgroundColor3 = Color3.fromRGB(70, 150, 96)
+		task.delay(0.15, function()
+			if pearlButton and pearlButton.Parent then
+				pearlButton.BackgroundColor3 = Color3.fromRGB(42, 112, 74)
+			end
+		end)
+	end
+end))
+
 local function updateStatus()
 	local health = plr:GetAttribute("Health")
 	local offhand = Hands.inv and Hands.inv.offhand
@@ -701,6 +955,9 @@ local function destroy()
 		espGui:Destroy()
 	end)
 	pcall(function()
+		pearlGui:Destroy()
+	end)
+	pcall(function()
 		gui:Destroy()
 	end)
 	if env.UNSTABLE_SMP_CFG == CFG then
@@ -713,6 +970,8 @@ end
 
 local api = {
 	cfg = CFG,
+	pearlCatch = pearlCatch,
+	refresh = refresh,
 	destroy = destroy
 }
 env.UNSTABLE_SMP = api
@@ -759,6 +1018,8 @@ track(UIS.InputBegan:Connect(function(input, gameProcessed)
 	elseif input.KeyCode == Enum.KeyCode.C then
 		CFG.critOnly = not CFG.critOnly
 		refresh()
+	elseif input.KeyCode == Enum.KeyCode.G then
+		pearlCatch()
 	end
 end))
 
